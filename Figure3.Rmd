@@ -33,7 +33,7 @@ imgDir <- "./figures/"
 imgDir_eps <- "./figures-eps/"
 ```
 
-## Figure 2: Longitudinal changes in microbiome profiles early and late in pregnancy
+## Figure 3: Longitudinal changes in microbiome profiles early and late in pregnancy
 
 **Early: First visit before 26wk**  
 **Late: Last visit after 26wk**  
@@ -368,7 +368,7 @@ ordDF.naa <- data.frame(mysharpel.naa$scores) %>%
   left_join(metadata, by="SampleID") %>%
   mutate(vagitype.2 = factor(vagitype.2, levels = myVagitypeOrder))
 
-# paul function
+# pca function
 l1pcaplot <- function(mypropdata) {
   mysharpel <- sharpel1pca(sqrt(mypropdata), projDim = 2, projections="l1")
   mycolors <- unique(ssdata.mv1d.hq.meta[,c("SampleID", "paulVTColors")])
@@ -475,7 +475,7 @@ vtlegend <- ggdraw(vtlegend)
 # combine 
 #title <- ggdraw() + draw_label("Beta Diversity: L1-Norm PCA", fontface = 'bold')
 fig3c <- plot_grid(plot1, NULL, plot2, nrow = 3, rel_heights = c(1,0.1,1) )
-fig3c <- plot_grid(fig2d, vtlegend, ncol=2, rel_widths = c(1,0.25))
+fig3c <- plot_grid(fig3c, vtlegend, ncol=2, rel_widths = c(1,0.25))
 fig3c
 ```
 
@@ -573,56 +573,5 @@ ggsave(paste(imgDir_eps, "Figure3c_VTlegend.eps", sep=""), vtlegend, units = "in
 
 ```
 
-
-```{r finalfig, fig.width=7, fig.height=5, include=TRUE}
-sampling_img <- readPNG(paste(imgDir, "momspi_sampling.png", sep=""))
-g <- rasterGrob(sampling_img, interpolate = TRUE)
-fig2a <- ggplot() + 
-  annotation_custom(g, xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf) +
-  theme(panel.border = element_blank())
-
-toprow <- plot_grid(fig2a, NULL, fig2b, nrow = 1, rel_widths = c(1,0.1,1.25), labels = c("a","", "b"))
-bottomrow <- plot_grid(NULL, fig2c, NULL, fig2d, nrow = 1, rel_widths = c(0.05,0.95,0.1,1.25), labels = c("c", "", "", "d"))
-fig2 <- plot_grid(toprow, NULL,bottomrow, ncol = 1, rel_heights = c(1,0.1,1))
-fig2
-```
-
-
-
-### Save the figure
-
-```{r, include=TRUE}
-
-#ggsave(paste(imgDir, "Figure2.png", sep=""), fig2, width = 14, height = 10, units = "in", dpi = 600)
-```
-
-### New Figure 
-
-```{r}
-fig <- plot_grid(fig2b,NULL,fig2c,NULL,fig2d, ncol = 1, rel_heights = c(1,0.1,1,0.1,1), labels = c("a", "", "b", "", "c"))
-#ggsave(paste(imgDir, "TBS-NMED-Figure3.png", sep=""), fig, width = 7, height = 14, units = "in", dpi = 600)
-```
-
-```{r}
-toprow.v2 <- plot_grid(NULL, fig2b, NULL, nrow = 1, rel_widths = c(0.1,1,0.1), labels = c("", "a", ""))
-bottomrow.v2 <- plot_grid(NULL, fig2c, NULL, fig2d, nrow = 1, rel_widths = c(0.05,0.95,0.1,1.25), labels = c("b", "", "", "c"))
-fig2.v2 <- plot_grid(toprow.v2, NULL,bottomrow.v2, ncol = 1, rel_heights = c(1,0.1,1))
-fig2.v2
-#ggsave(paste(imgDir, "Figure2-v2.png", sep=""), fig2.v2, width = 14, height = 10, units = "in", dpi = 600)
-```
-
-```{r}
-# Early - Late samples - MeFiT stats
-mysamples <- metadata %>%
-  filter(!is.na(el))
-mefit.el <- mefit %>%
-  filter(SampleID %in% mysamples$SampleID) %>%
-  left_join(mysamples, by="SampleID") %>%
-  select(el, SampleID, race.3, TotalReads, Overlapping, `%Overlapping`, NonOverlapping, `%NonOverlapping`,
-         AvgReadLength, AvgQuality, Avgmeep, HQReads, `%HQReads`, `HQ-%Overlapping`, `HQ-AvgReadLength`,
-         `HQ-AvgQuality`, `HQ-Avgmeep`) %>%
-  arrange(el, race.3)
-#write_tsv(mefit.el, paste(dataDir, "Early-Late.mefit-stats.tsv", sep=""))
-```
 
 
