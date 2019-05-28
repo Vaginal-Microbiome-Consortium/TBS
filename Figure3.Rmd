@@ -1,0 +1,628 @@
+---
+title: "Racioethnic diversity in the dynamics of vaginal microbiome during pregnancy"
+author: "Hardik I Parikh"
+date: "03/14/2019"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(reshape2)
+library(magrittr)
+library(cowplot)
+library(vegan)
+library(ggpubr)
+library(pcaL1)
+library(grid)
+library(png)
+theme_set(theme_bw())
+set.seed(12345)
+
+###
+###
+dataDir <- "./data/"
+imgDir <- "./figures/"
+imgDir_eps <- "./figures-eps/"
+```
+
+## Figure 2: Longitudinal changes in microbiome profiles early and late in pregnancy
+
+**Early: First visit before 26wk**  
+**Late: Last visit after 26wk**  
+
+
+### Load Data
+
+```{r loadData, include=TRUE}
+
+# stirrups profiles
+ssdata <- read_delim(paste(dataDir, "stirrups_profiles.txt", sep=""), delim="\t")
+
+# mefit
+mefit <- read_delim(paste(dataDir, "mefit_stats.txt", sep=""), delim="\t")
+hqsamples <- mefit %>%
+  filter(grepl("MV1D", SampleID) & HQReads >= 1000)
+
+# remove BT assignments, taxa below 0.01%, 
+# select samples with >1k hqreads
+ssdata <- ssdata %>%
+  filter(`Threshold-Status` == "AT" & 
+           Percentage_Abundance > 0.01 & 
+           SampleID %in% hqsamples$SampleID)
+
+## re-normalize proportions
+totReads <- ssdata %>%
+  group_by(SampleID) %>%
+  summarise(TotalReads = sum(No_of_Reads))
+ssdata.mv1d.hq <- left_join(ssdata, totReads, by="SampleID") %>%
+  mutate(ATprop = (No_of_Reads/TotalReads)*100)
+
+
+# add paulColors
+mypropdata <- acast(ssdata.mv1d.hq, SampleID~Taxa, value.var = "ATprop", fill = 0.0)
+mycolors <- c(rainbow(ncol(mypropdata), start=0.2, end=0.90))
+mycolors[grep("Lactobacillus", colnames(mypropdata))] <- "yellow"
+mycolors[grep("Sneathia", colnames(mypropdata))] <- "purple"
+mycolors[grep("Gardnerella", colnames(mypropdata))] <- "red"
+mycolors[grep("Lachnospiraceae", colnames(mypropdata))] <- "orange"
+mycolors[grep("BVAB", colnames(mypropdata))] <- "orange"
+mycolors[grep("Prevotella", colnames(mypropdata))] <- "blue"
+mycolors[grep("Atopobium", colnames(mypropdata))] <- "brown"
+mycolors[grep("crispatus", colnames(mypropdata))] <- "yellow"
+mycolors[grep("iners", colnames(mypropdata))] <- "lightblue"
+mycolors[grep("gasseri", colnames(mypropdata))] <- "pink"
+mycolors[grep("delbrueckii", colnames(mypropdata))] <- "yellow3"
+mycolors[grep("jensenii", colnames(mypropdata))] <- "green"
+mycolors[grep("Sneathia.amnii", colnames(mypropdata))] <- "purple"
+mycolors[grep("Streptococcus", colnames(mypropdata))] <- "orange"
+mycolorsDF <- data.frame(Taxa=colnames(mypropdata), paulColors=mycolors)
+ssdata.mv1d.hq <- ssdata.mv1d.hq %>% left_join(mycolorsDF, by="Taxa")
+```
+
+### Create metadata 
+
+```{r metadata, include=TRUE}
+
+# participant-kit-sample mapping
+mappingDF <- read_delim(paste(dataDir, "mapping.txt", sep=""), delim="\t")
+
+# demographics
+raceDF <- read_delim(paste(dataDir, "race.txt", sep=""), delim="\t")
+raceDF <- raceDF %>%
+  mutate(race.3 = ifelse(grepl("non", race.2), "non-African descent", "African descent")) %>%
+  mutate(race.3 = factor(race.3, levels = c("non-African descent", "African descent"))) %>%
+  mutate(race.4 = ifelse(grepl("non", race.2), "n-Afr", "Afr")) %>%
+  mutate(race.4 = factor(race.4, levels = c("n-Afr", "Afr")))
+
+# true gestational age
+gestAgeDF <- read_delim(paste(dataDir, "trueGA.txt", sep=""), delim="\t")
+
+# one kit per trimester
+okptDF <- read_delim(paste(dataDir, "oneKitperTri.txt", sep=""), delim="\t")
+
+# join all metadata fields
+metadata <- left_join(mappingDF, raceDF, by="ParticipantID") %>%
+  left_join(gestAgeDF, by="KitID") %>%
+  filter(grepl("MV1D", SampleID)) %>%
+  mutate(okpt = ifelse(SampleID %in% okptDF$SampleID, "Yes", "No"))
+  
+# participants with samples in all 3 trimester
+participants.all3tri <- metadata %>%
+  filter(okpt == "Yes") %>%
+  select(ParticipantID, trimester, okpt) %>%
+  count(ParticipantID) %>%
+  filter(n==3)
+metadata <- metadata %>%
+  mutate(all3tri = ifelse(ParticipantID %in% participants.all3tri$ParticipantID, "Yes", "No"))
+
+# earlylate samples
+esamples <- metadata %>%
+  filter(SampleID %in% ssdata.mv1d.hq$SampleID) %>%
+  filter(trueGA < 182) %>%
+  group_by(ParticipantID) %>%
+  filter(VisitNum == min(VisitNum)) 
+lsamples <- metadata %>%
+  filter(SampleID %in% ssdata.mv1d.hq$SampleID) %>%
+  filter(trueGA >= 182) %>%
+  group_by(ParticipantID) %>%
+  filter(VisitNum == max(VisitNum)) 
+metadata <- metadata %>%
+  mutate(el = ifelse(SampleID %in% esamples$SampleID, "early", 
+                     ifelse(SampleID %in% lsamples$SampleID, "late", NA)))
+
+# add metadata to profiles
+ssdata.mv1d.hq.meta <- left_join(ssdata.mv1d.hq, metadata, by="SampleID")
+```
+
+### Sample Counts
+
+```{r counts, include=TRUE}
+cat("Participant Counts:")
+tmp <- unique(data.frame(metadata$ParticipantID, metadata$race, metadata$race.2))
+#table(tmp$metadata.race)
+table(tmp$metadata.race.2)
+
+cat("Sample Counts - Early Late Pregnancy")
+tmp <- unique(data.frame(ssdata.mv1d.hq.meta$SampleID, ssdata.mv1d.hq.meta$trimester, ssdata.mv1d.hq.meta$race.2, ssdata.mv1d.hq.meta$el))
+tmp <- tmp[!is.na(tmp$ssdata.mv1d.hq.meta.el),]
+tmp <- droplevels(tmp)
+table(tmp$ssdata.mv1d.hq.meta.el, tmp$ssdata.mv1d.hq.meta.race.2)
+```
+
+### Stacked Bars
+
+```{r sortFunc, include=TRUE}
+# ++++++++++++++++++++++++++++
+# sortByVagitype.v2
+# ++++++++++++++++++++++++++++
+### 16S microbial profiles
+### This function sorts Samples by Vagitype
+### Steps:
+###   1. Samples are classified into vagitypes (>= 30% dominant taxa)
+###   2. Samples ordered based on decreasing abundance of characteristic taxa
+###   3. Vagitype Order - 
+###         L.crispatus, L.iners, L.jensenii, L.gasseri, BVAB1, G.vaginalis, A.vaginae, OtherVT, NoType
+### Returns: Samples sorted by Vagitypes (custom order), that can be used as factor levels to plot StackedBars
+
+sortByVagitype.v2 <- function(propData) {
+ 
+  ## identify vagitypes
+  vagTypes <- apply(propData, 1, which.max)
+  maxProp <- propData[matrix(c(1:nrow(propData),vagTypes), ncol=2)]
+  vagTypes <- colnames(propData)[vagTypes]
+  vagTypes[maxProp < 30.0] <- "No Type"
+  
+  ## my vagTypeDF
+  vagTypeDF <- data.frame(cbind(rownames(propData), vagTypes))
+  vagTypeDF$vagTypes.2 <- NA
+  for(i in 1:nrow(vagTypeDF)) {
+    if(grepl("crispatus", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.crispatus"}
+    else if(grepl("iners", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.iners"}
+    else if(grepl("jensenii", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.jensenii"}
+    else if(grepl("gasseri", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.gasseri"}
+    else if(grepl("BVAB1", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "BVAB1"}
+    else if(grepl("vaginalis", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "G.vaginalis"}
+    else if(grepl("Atopobium_vaginae", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "A.vaginae"}
+    else if(grepl("No Type", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "NoType"}
+    else {vagTypeDF[i,3] <- "OtherVT"}
+  }
+  vagTypes.uniq <- unique(vagTypeDF$vagTypes.2)
+  
+  # set default vagitype order
+  myVTOrder <- c("L.crispatus", "L.jensenii", "L.gasseri", "L.iners", "G.vaginalis", "BVAB1", "A.vaginae","OtherVT", "NoType")
+
+  # set default sampleOrder
+  sampleOrder <- vector(mode="character", length=0)
+  for (x in myVTOrder) {
+    if (x %in% vagTypes.uniq) {
+      samples <- vagTypeDF[grepl(x, vagTypeDF$vagTypes.2),]
+      if (length(samples$V1) > 1) {
+            propData.tmp <- propData[rownames(propData) %in% samples$V1,]
+            propData.tmp.melt <- melt(propData.tmp)
+            propData.tmp.melt <- propData.tmp.melt[order(-propData.tmp.melt$value, propData.tmp.melt$Var2, propData.tmp.melt$Var1),]
+            propData.tmp.melt$Var1 <- factor(propData.tmp.melt$Var1, levels = unique(propData.tmp.melt$Var1))
+            sampleOrder <- c(sampleOrder, levels(propData.tmp.melt$Var1))
+      }
+      else {
+        sampleOrder <- c(sampleOrder, as.character(samples$V1))
+      }
+    }
+  }
+  
+  ### return the custom sample order
+  return(sampleOrder)
+}
+
+
+myGGPlotTheme <- function() {
+  return(theme_bw() + 
+        theme(axis.text.x=element_blank(),
+              axis.ticks.x=element_blank(),
+              axis.text.y=element_text(face="bold",size=8),
+              axis.title=element_text(size=10,face="bold"),
+              plot.title = element_text(size=14, face="bold"),
+              strip.text = element_blank(),
+              plot.margin = unit(c(0, 0, 0, 0), "cm"),
+              legend.position = "none")
+  )
+}
+
+```
+
+
+
+```{r sb1, fig.width=7, include=TRUE}
+mypropdata <- acast(ssdata.mv1d.hq.meta, SampleID~Taxa, value.var = "ATprop", fill=0.0)
+sampleorder <- sortByVagitype.v2(mypropdata)
+ssdata.mv1d.hq.meta$SampleID <- factor(ssdata.mv1d.hq.meta$SampleID, levels = sampleorder)
+
+# stacked bar non-African descent 
+ssdata.mv1d.hq.meta.el.naa <- ssdata.mv1d.hq.meta %>%
+  filter((!is.na(el) & race.3 == "non-African descent")) %>%
+  droplevels(.)
+fig <- ggplot(ssdata.mv1d.hq.meta.el.naa, aes(SampleID, ATprop, fill=paulColors, group=ATprop)) + 
+      geom_bar(stat="identity", position="stack", width=1) +
+      scale_fill_manual(values = levels(ssdata.mv1d.hq.meta.el.naa$paulColors)) +
+      facet_grid(race.3~el, scales = "free_x", space = "free_x") + 
+      labs(x="", y="Relative Abundance") + 
+      myGGPlotTheme() 
+fig.naa <- plot_grid(NULL, fig, ncol = 1, rel_heights = c(0.1,1))
+
+# stacked bar African descent
+ssdata.mv1d.hq.meta.el.aa <- ssdata.mv1d.hq.meta %>%
+  filter((!is.na(el) & race.3 == "African descent")) %>%
+  droplevels(.)
+fig <- ggplot(ssdata.mv1d.hq.meta.el.aa, aes(SampleID, ATprop, fill=paulColors, group=ATprop)) + 
+      geom_bar(stat="identity", position="stack", width=1) +
+      scale_fill_manual(values = levels(ssdata.mv1d.hq.meta.el.aa$paulColors)) +
+      facet_grid(race.3~el, scales = "free_x", space = "free_x") + 
+      labs(x="", y="Relative Abundance") + 
+      myGGPlotTheme() 
+fig.aa <- plot_grid(NULL, fig, ncol = 1, rel_heights = c(0.1,1))
+
+
+### Taxa Legend
+myTaxaList <- c("Lactobacillus_crispatus_cluster",  "Lactobacillus_jensenii", "Lactobacillus_gasseri_cluster",
+                "Lactobacillus_iners", "Lachnospiraceae_BVAB1", "Gardnerella_vaginalis",
+                "Atopobium_vaginae", "Sneathia_amnii", "Prevotella_cluster2") 
+plotDF2 <- ssdata.mv1d.hq.meta %>%
+        filter(Taxa %in% myTaxaList) %>%
+        droplevels(.)
+tmp <- ggplot(plotDF2, aes(SampleID, ATprop, fill=paulColors, group=ATprop)) + 
+          geom_bar(stat="identity", position="stack", width=1) +
+          scale_fill_manual(values=c("yellow", "green", "pink", 
+                                     "lightblue", "orange", "red",
+                                     "brown", "purple", "blue"), 
+                    labels=c(expression(italic("L. crispatus")), expression(italic("L. jensenii")),
+                             expression(italic("L. gasseri")), expression(italic("L. iners")),
+                             "BVAB1", expression(italic("G. vaginalis")),
+                             expression(italic("A. vaginae")), expression(italic("S. amnii")),
+                             "Prevotella cluster2")) + 
+          labs(x="", y="Relative Abundance") + 
+          theme(legend.position = "bottom",
+                legend.title = element_text(size=12, face="bold"),
+                legend.text = element_text(size=12),
+                legend.text.align = 0,
+                plot.margin = unit(c(0, 0, 0, 0), "cm")) 
+tmp_leg1col <- tmp +
+          guides(fill=guide_legend(ncol = 1, title = "", 
+                                   title.position = "top",override.aes = list(size=2)))
+legend_side <- get_legend(tmp_leg1col)
+tlegend1col <- ggdraw(legend_side)
+
+
+fig3a <- plot_grid(fig.naa, NULL, fig.aa, nrow = 3, rel_heights = c(1, 0.1, 1))
+fig3a <- plot_grid(fig3a, tlegend1col, nrow = 1, rel_widths = c(1,0.25) )
+
+#fig3a
+```
+
+
+```{r bd, include=TRUE}
+# ++++++++++++++++++++++++++++
+# getVagitype
+# ++++++++++++++++++++++++++++
+### This function retuns the vagitype of each Sample
+### Vagitype definition: >= 30% of dominant taxa 
+getVagitype <- function(propData) {
+  ## identify vagitypes
+  vagTypes <- apply(propData, 1, which.max)
+  maxProp <- propData[matrix(c(1:nrow(propData),vagTypes), ncol=2)]
+  vagTypes <- colnames(propData)[vagTypes]
+  vagTypes[maxProp < 30.0] <- "No Type"
+  
+  ## my vagTypeDF
+  vagTypeDF <- data.frame(cbind(rownames(propData), vagTypes))
+  vagTypeDF$vagTypes.2 <- NA
+  for(i in 1:nrow(vagTypeDF)) {
+    if(grepl("crispatus", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.crispatus"}
+    else if(grepl("iners", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.iners"}
+    else if(grepl("jensenii", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.jensenii"}
+    else if(grepl("gasseri", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.gasseri"}
+    else if(grepl("BVAB1", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "BVAB1"}
+    else if(grepl("vaginalis", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "G.vaginalis"}
+    else if(grepl("vaginae", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "A.vaginae"}
+    else if(grepl("No Type", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "NoType"}
+    else {vagTypeDF[i,3] <- "OtherVT"}
+  }
+  
+  ## set colnames
+  colnames(vagTypeDF) <- c("SampleID", "vagitype", "vagitype.2") 
+  
+  return(vagTypeDF)
+}
+
+ssdata.mv1d.hq.meta.el <- ssdata.mv1d.hq.meta %>%
+  filter(!is.na(el)) %>%
+  droplevels(.)
+ssdata.mv1d.hq.meta.el.mat <- acast(ssdata.mv1d.hq.meta.el, SampleID~Taxa, value.var = "ATprop", fill=0.0)
+vagitypeDF <- getVagitype(ssdata.mv1d.hq.meta.el.mat)
+metadata <- left_join(metadata, vagitypeDF, by="SampleID")
+```
+
+```{r, include=TRUE}
+### l1norm PCA 
+myVagitypeOrder <- c("L.crispatus", "L.jensenii", "L.gasseri", "L.iners", "G.vaginalis", 
+                     "BVAB1", "A.vaginae", "OtherVT", "NoType")
+
+### non-african descent
+samples.naa <- metadata %>%
+  filter(!is.na(el) & race.4 == "n-Afr")
+mymat.naa <- ssdata.mv1d.hq.meta.el.mat[rownames(ssdata.mv1d.hq.meta.el.mat) %in% samples.naa$SampleID,]
+mysharpel.naa <- sharpel1pca(sqrt(mymat.naa), projDim = 2, projections = "l1")
+myl2projections.naa <- l2projection(mymat.naa, mysharpel.naa$loadings)
+totalDisp.naa <- sum(apply(mymat.naa, 2, var))
+scoreDisp.naa <- apply(myl2projections.naa$scores, 2, var)
+varexp.naa <- scoreDisp.naa/totalDisp.naa
+
+ordDF.naa <- data.frame(mysharpel.naa$scores) %>%
+  rownames_to_column(var="SampleID") %>%
+  left_join(metadata, by="SampleID") %>%
+  mutate(vagitype.2 = factor(vagitype.2, levels = myVagitypeOrder))
+
+# paul function
+l1pcaplot <- function(mypropdata) {
+  mysharpel <- sharpel1pca(sqrt(mypropdata), projDim = 2, projections="l1")
+  mycolors <- unique(ssdata.mv1d.hq.meta[,c("SampleID", "paulVTColors")])
+  mycolors[,1] <- as.character(mycolors[,1])
+  mycolors[,2] <- as.character(mycolors[,2])
+  rownames(mycolors) <- mycolors[,1]
+  mycolors <- mycolors[rownames(mypropdata),]
+  mydf <- data.frame(mysharpel$scores,mycolorsdf = mycolors[,2])
+  
+  myl2projection <- l2projection(mypropdata, mysharpel$loadings)
+  totalDisp <- sum(apply(mypropdata, 2, var))
+  scoreDisp <- apply(myl2projection$scores, 2, var)
+  varexp <- scoreDisp/totalDisp
+  
+  p <- ggplot(mydf, 
+              aes(x=X1,y=X2)) + 
+         geom_point(color=mycolors[,2]) +
+         xlab(paste("PC 1 (", format(100*varexp[1],digits=3), "%)", sep="")) +
+         ylab(paste("PC 2 (", format(100*varexp[2],digits=3), "%)", sep=""))
+  p
+}
+#l1pcaplot(mymat)
+
+plot1 <- ggplot(ordDF.naa, aes(X1, X2, color=vagitype.2)) +
+  geom_point(aes(fill=vagitype.2), size=1.5, shape=21, color="black") + 
+  scale_fill_manual(values = c("L.crispatus" = "yellow", "L.jensenii" = "green", "L.gasseri" = "pink",
+                                "L.iners" = "lightblue", "G.vaginalis" = "red", "BVAB1" = "orange",
+                                "A.vaginae" = "brown", "OtherVT" = "darkcyan", "NoType" = "gray30")) +
+  facet_grid(race.3~el) + 
+  labs(x = paste("PC 1 (", format(100*varexp.naa[1],digits=3), "%)", sep=""), 
+       y = paste("PC 2 (", format(100*varexp.naa[2],digits=3), "%)", sep="")) +
+  theme_bw() +  theme(legend.position = "none",
+                      legend.title = element_text(size=10, face="bold"),
+                      legend.text = element_text(size=10),
+                      legend.text.align = 0,
+                      strip.text = element_blank(),
+                      axis.title = element_text(size=10, face="bold"), 
+                      axis.text = element_text(size=8, face="bold"), 
+                      plot.margin = unit(c(0, 0, 0, 0), "cm")) + 
+  guides(fill=guide_legend(ncol = 1, title = "Vagitype", 
+                            title.position = "top", override.aes = list(size=3))) 
+#plot1
+
+### african descent
+samples.aa <- metadata %>%
+  filter(!is.na(el) & race.4 == "Afr")
+mymat.aa <- ssdata.mv1d.hq.meta.el.mat[rownames(ssdata.mv1d.hq.meta.el.mat) %in% samples.aa$SampleID,]
+mysharpel.aa <- sharpel1pca(sqrt(mymat.aa), projDim = 2, projections = "l1")
+myl2projections.aa <- l2projection(mymat.aa, mysharpel.aa$loadings)
+totalDisp.aa <- sum(apply(mymat.aa, 2, var))
+scoreDisp.aa <- apply(myl2projections.aa$scores, 2, var)
+varexp.aa <- scoreDisp.aa/totalDisp.aa
+ordDF.aa <- data.frame(mysharpel.aa$scores) %>%
+  rownames_to_column(var="SampleID") %>%
+  left_join(metadata, by="SampleID") %>%
+  mutate(vagitype.2 = factor(vagitype.2, levels = myVagitypeOrder))
+plot2 <- ggplot(ordDF.aa, aes(X1, X2, color=vagitype.2)) +
+  geom_point(aes(fill=vagitype.2), shape=21, size=1.5, color="black") +
+  scale_fill_manual(values = c("L.crispatus" = "yellow", "L.jensenii" = "green", "L.gasseri" = "pink",
+                                "L.iners" = "lightblue", "G.vaginalis" = "red", "BVAB1" = "orange",
+                                "A.vaginae" = "brown", "OtherVT" = "darkcyan", "NoType" = "gray30")) +
+  facet_grid(race.3~el) + 
+  labs(x = paste("PC 1 (", format(100*varexp.aa[1],digits=3), "%)", sep=""), 
+       y = paste("PC 2 (", format(100*varexp.aa[2],digits=3), "%)", sep="")) + 
+  theme_bw() +  theme(legend.position = "none",
+                      legend.title = element_text(size=10, face="bold"),
+                      legend.text = element_text(size=10),
+                      legend.text.align = 0,
+                      strip.text = element_blank(),
+                      axis.title = element_text(size=10, face="bold"), 
+                      axis.text = element_text(size=8, face="bold"), 
+                      plot.margin = unit(c(0, 0, 0, 0), "cm")) + 
+  guides(fill=guide_legend(ncol = 1, title = "Vagitype", 
+                            title.position = "top", override.aes = list(size=3))) 
+#plot2
+
+# vagitype legend
+plot3 <- ggplot(ordDF.naa, aes(X1, X2, color=vagitype.2)) +
+  geom_point(aes(fill=vagitype.2), shape=21, size=1.5, color="black") +
+  scale_fill_manual(values = c("yellow", "green", "pink",
+                                "lightblue", "orange", "red",
+                                "brown", "darkcyan", "gray30"),
+                      labels = c(expression(italic("L. crispatus")), expression(italic("L. jensenii")),
+                                 expression(italic("L. gasseri")), expression(italic("L. iners")),
+                                 "BVAB1", expression(italic("G. vaginalis")), 
+                                 expression(italic("A. vaginae")), "Other VT", "No Type")) +
+  facet_grid(race.3~el) + 
+  labs(x = "PC1", y="PC2") + 
+  theme_bw() +  theme(legend.position = "none",
+                      legend.title = element_text(size=12, face="bold"),
+                      legend.text = element_text(size=12),
+                      legend.text.align = 0,
+                      strip.text = element_text(size=12, face="bold"),
+                      axis.title = element_text(size=10, face="bold"), 
+                      axis.text = element_text(size=8, face="bold"), 
+                      plot.margin = unit(c(0, 0, 0, 0), "cm")) + 
+  guides(fill=guide_legend(ncol = 1, title = "", 
+                            title.position = "top", override.aes = list(size=3))) 
+tmp <- plot3 + 
+  theme(legend.position = "bottom")
+vtlegend <- get_legend(tmp)
+vtlegend <- ggdraw(vtlegend)
+
+# combine 
+#title <- ggdraw() + draw_label("Beta Diversity: L1-Norm PCA", fontface = 'bold')
+fig3c <- plot_grid(plot1, NULL, plot2, nrow = 3, rel_heights = c(1,0.1,1) )
+fig3c <- plot_grid(fig2d, vtlegend, ncol=2, rel_widths = c(1,0.25))
+fig3c
+```
+
+
+### Alluvial Plot
+
+```{r, fig.height=3}
+library(alluvial)
+library(ggalluvial)
+
+vt_freq.naa <- metadata %>%
+  filter(!is.na(el) & race.4 == "n-Afr") %>%
+  select(el, vagitype, vagitype.2, ParticipantID, SampleID) %>%
+  mutate(myvt = ifelse(grepl("Lactobacillus", vagitype), "Lactobacillus", "non-Lactobacillus")) %>%
+  dcast(ParticipantID~el, value.var = "myvt") %>%
+  group_by(early, late) %>%
+  count() %>%
+  filter(!is.na(late)) %>%
+  mutate(transition = ifelse(early == late, "No", "Yes"))
+is_alluvia_form(as.data.frame(vt_freq.naa), silent = TRUE)
+
+p.naa <- ggplot(as.data.frame(vt_freq.naa), aes(y = n, axis1 = early, axis2 = late)) +
+  geom_alluvium(aes(fill=transition)) +
+  geom_stratum() +
+  geom_text(stat = "stratum", label=c(expression(paste("non-", italic("Lactobacillus"), " (7)")), 
+                                      expression(paste(italic("Lactobacillus"), " (33)")), 
+                                      expression(paste("non-", italic("Lactobacillus"), " (9)")), 
+                                      expression(paste(italic("Lactobacillus"), " (31)"))),
+            size=3) +
+  scale_x_discrete(limits = c("early", "late"), expand = c(.03, .03)) +
+  annotate("text", x=1.2, y=28, label="0.85", size=3) +
+  annotate("text", x=1.2, y=10, label="0.15", size=3) +
+  annotate("text", x=1.2, y=5.5, label="0.43", size=3) +
+  annotate("text", x=1.2, y=2, label="0.57", size=3) +
+  scale_fill_brewer(type = "qual", palette = "Set2") +
+  ggtitle("")+ 
+  theme_bw() + 
+  theme(axis.text.y = element_blank(), panel.grid = element_blank(),
+        axis.ticks = element_blank(), axis.title = element_blank(),
+        legend.position = "none", 
+        axis.text.x = element_text(size=12, face = "bold"), 
+        panel.border = element_blank(),
+        plot.title = element_text(size=14, face="bold"))
+#p.naa
+
+vt_freq.aa <- metadata %>%
+  filter(!is.na(el) & race.4 == "Afr") %>%
+  select(el, vagitype, vagitype.2, ParticipantID, SampleID) %>%
+  mutate(myvt = ifelse(grepl("Lactoba", vagitype), "Lactobacillus", "non-Lactobacillus")) %>%
+  dcast(ParticipantID~el, value.var = "myvt") %>%
+  group_by(early, late) %>%
+  count() %>%
+  filter(!is.na(late)) %>%
+  mutate(transition = ifelse(early == late, "No", "Yes"))
+is_alluvia_form(as.data.frame(vt_freq.naa),silent = TRUE)
+
+p.aa <- ggplot(as.data.frame(vt_freq.aa), aes(y = n, axis1 = early, axis2 = late)) +
+  geom_alluvium(aes(fill=transition)) +
+  guides(fill=FALSE) +
+  geom_stratum() +
+  geom_text(stat = "stratum", label=c(expression(paste("non-", italic("Lactobacillus"), " (22)")), 
+                                      expression(paste(italic("Lactobacillus"), " (27)")), 
+                                      expression(paste("non-", italic("Lactobacillus"), " (14)")), 
+                                      expression(paste(italic("Lactobacillus"), " (35)"))),
+            size=3) +
+  annotate("text", x=1.2, y=38.5, label="0.78", size=3) +
+  annotate("text", x=1.2, y=26, label="0.22", size=3) +
+  annotate("text", x=1.2, y=15.5, label="0.64", size=3) +
+  annotate("text", x=1.2, y=4, label="0.36", size=3) +
+  scale_x_discrete(limits = c("early", "late"), expand = c(.03, .03)) +
+  scale_fill_brewer(type = "qual", palette = "Set2") +
+  ggtitle("")+ 
+  theme_bw() + 
+  theme(axis.text.y = element_blank(), panel.grid = element_blank(),
+        axis.ticks = element_blank(), axis.title = element_blank(),
+        legend.position = "none", plot.title = element_text(size=14, face="bold"),
+        axis.text.x = element_text(size=12, face = "bold"),
+        panel.border = element_blank())
+
+fig3b <- plot_grid(p.naa, p.aa, ncol = 1)
+fig3b
+
+```
+
+```{r}
+### save eps files
+ggsave(paste(imgDir_eps, "Figure3a_non-afr.eps", sep=""), fig.naa, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3a_afr.eps", sep=""), fig.aa, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3a_taxalegend.eps", sep=""), tlegend1col, units = "in", width = 2, height = 3, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3b_non-afr.pdf", sep=""), p.naa, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3b_afr.pdf", sep=""), p.aa, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3c_non-afr.eps", sep=""), plot1, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3c_afr.eps", sep=""), plot2, units = "in", width = 7, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure3c_VTlegend.eps", sep=""), vtlegend, units = "in", width = 2, height = 3, dpi = 600)
+
+```
+
+
+```{r finalfig, fig.width=7, fig.height=5, include=TRUE}
+sampling_img <- readPNG(paste(imgDir, "momspi_sampling.png", sep=""))
+g <- rasterGrob(sampling_img, interpolate = TRUE)
+fig2a <- ggplot() + 
+  annotation_custom(g, xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf) +
+  theme(panel.border = element_blank())
+
+toprow <- plot_grid(fig2a, NULL, fig2b, nrow = 1, rel_widths = c(1,0.1,1.25), labels = c("a","", "b"))
+bottomrow <- plot_grid(NULL, fig2c, NULL, fig2d, nrow = 1, rel_widths = c(0.05,0.95,0.1,1.25), labels = c("c", "", "", "d"))
+fig2 <- plot_grid(toprow, NULL,bottomrow, ncol = 1, rel_heights = c(1,0.1,1))
+fig2
+```
+
+
+
+### Save the figure
+
+```{r, include=TRUE}
+
+#ggsave(paste(imgDir, "Figure2.png", sep=""), fig2, width = 14, height = 10, units = "in", dpi = 600)
+```
+
+### New Figure 
+
+```{r}
+fig <- plot_grid(fig2b,NULL,fig2c,NULL,fig2d, ncol = 1, rel_heights = c(1,0.1,1,0.1,1), labels = c("a", "", "b", "", "c"))
+#ggsave(paste(imgDir, "TBS-NMED-Figure3.png", sep=""), fig, width = 7, height = 14, units = "in", dpi = 600)
+```
+
+```{r}
+toprow.v2 <- plot_grid(NULL, fig2b, NULL, nrow = 1, rel_widths = c(0.1,1,0.1), labels = c("", "a", ""))
+bottomrow.v2 <- plot_grid(NULL, fig2c, NULL, fig2d, nrow = 1, rel_widths = c(0.05,0.95,0.1,1.25), labels = c("b", "", "", "c"))
+fig2.v2 <- plot_grid(toprow.v2, NULL,bottomrow.v2, ncol = 1, rel_heights = c(1,0.1,1))
+fig2.v2
+#ggsave(paste(imgDir, "Figure2-v2.png", sep=""), fig2.v2, width = 14, height = 10, units = "in", dpi = 600)
+```
+
+```{r}
+# Early - Late samples - MeFiT stats
+mysamples <- metadata %>%
+  filter(!is.na(el))
+mefit.el <- mefit %>%
+  filter(SampleID %in% mysamples$SampleID) %>%
+  left_join(mysamples, by="SampleID") %>%
+  select(el, SampleID, race.3, TotalReads, Overlapping, `%Overlapping`, NonOverlapping, `%NonOverlapping`,
+         AvgReadLength, AvgQuality, Avgmeep, HQReads, `%HQReads`, `HQ-%Overlapping`, `HQ-AvgReadLength`,
+         `HQ-AvgQuality`, `HQ-Avgmeep`) %>%
+  arrange(el, race.3)
+#write_tsv(mefit.el, paste(dataDir, "Early-Late.mefit-stats.tsv", sep=""))
+```
+
+
