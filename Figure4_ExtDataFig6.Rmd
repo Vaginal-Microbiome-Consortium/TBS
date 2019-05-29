@@ -1,0 +1,413 @@
+---
+title: "Racioethnic diversity in the dynamics of vaginal microbiome during pregnancy"
+author: "Hardik I Parikh"
+date: "03/11/2019"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+      number_sections: true
+---
+
+## Figure 4: Longitudinal stability
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(reshape2)
+library(tidyverse)
+library(cowplot)
+library(fuzzyjoin)
+library(vegan)
+library(grid)
+library(gridExtra)
+library(ggpubr)
+library(data.table)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+theme_set(theme_bw())
+set.seed(12345)
+
+dataDir <- "./data/"
+imgDir <- "./figures/"
+imgDir_eps <- "./figures-eps/"
+```
+
+## Load Data
+
+#### 1. Load 16S profiles
+```{r loadProfs, echo=TRUE}
+
+###################
+# 16S data #
+###################
+## read the re-calculated proportions based on AT classification
+ssdata <- read.csv2(paste(dataDir, "stirrups_profiles.txt", sep=""), header=TRUE, sep='\t')
+ssdata$Percentage_Abundance <- as.numeric(as.character(ssdata$Percentage_Abundance))
+# remove below threshold data
+ssdata <- ssdata[ssdata$Threshold.Status == "AT",]
+ssdata <- droplevels(ssdata)
+
+## remove taxa assignments below 0.01% relab, and re-normalize
+ssdata <- ssdata[!(ssdata$Percentage_Abundance < 0.01), ]
+foo <- ssdata %>%
+  group_by(SampleID) %>%
+  summarise(TotalReads = sum(No_of_Reads))
+ssdata <- left_join(ssdata, foo, by="SampleID") %>%
+  mutate(ATprop = (No_of_Reads/TotalReads)*100)
+
+## keep vaginal samples only
+ssdata.mv1d <- ssdata[grepl("MV1D", ssdata$SampleID),]
+
+# read the mefit file to get HQ read count
+mefit <- read.csv2(paste(dataDir, "mefit_stats.txt", sep=""), header = TRUE, sep = "\t")
+hqsamples <- mefit[mefit$HQReads >= 1000, ]
+
+# filter hq samples (reads >= 1000) 
+ssdata.mv1d.hq <- ssdata.mv1d[ssdata.mv1d$SampleID %in% hqsamples$SampleID,]
+
+# add taxacolors
+taxa.colors <- read.csv2(paste(dataDir, "taxa_colors.txt", sep=""), header = T, sep = "\t", stringsAsFactors = FALSE)
+ssdata.mv1d.hq <- ssdata.mv1d.hq %>% regex_left_join(taxa.colors, by="Taxa")
+ssdata.mv1d.hq$Taxa.y <- NULL
+colnames(ssdata.mv1d.hq)[3] <- "Taxa"
+ssdata.mv1d.hq$TaxaColor[is.na(ssdata.mv1d.hq$TaxaColor)] <- "#faf0e6"
+ssdata.mv1d.hq$TaxaColor <- factor(ssdata.mv1d.hq$TaxaColor)
+
+
+# add paulColors
+mypropdata <- acast(ssdata.mv1d.hq, SampleID~Taxa, value.var = "ATprop", fill = 0.0)
+mycolors <- c(rainbow(ncol(mypropdata), start=0.2, end=0.90))
+mycolors[grep("Lactobacillus",   colnames(mypropdata))]      <- "yellow"
+mycolors[grep("Sneathia",   colnames(mypropdata))]           <- "purple"
+mycolors[grep("Gardnerella",     colnames(mypropdata))]      <- "red"
+mycolors[grep("Lachnospiraceae", colnames(mypropdata))]      <- "orange"
+mycolors[grep("BVAB", colnames(mypropdata))]                 <- "orange"
+mycolors[grep("Prevotella",        colnames(mypropdata))]    <- "blue"
+mycolors[grep("Atopobium",        colnames(mypropdata))]     <- "brown"
+mycolors[grep("crispatus",   colnames(mypropdata))]           <- "yellow"
+mycolors[grep("iners",   colnames(mypropdata))]               <- "lightblue"
+mycolors[grep("gasseri",   colnames(mypropdata))]             <- "pink"
+mycolors[grep("delbrueckii",   colnames(mypropdata))]         <- "yellow3"
+mycolors[grep("jensenii",   colnames(mypropdata))]            <- "green"
+mycolors[grep("Sneathia.amnii",        colnames(mypropdata))] <- "purple"
+mycolors[grep("Streptococcus",     colnames(mypropdata))]     <- "orange"
+mycolorsDF <- data.frame(Taxa=colnames(mypropdata), paulColors=mycolors)
+
+ssdata.mv1d.hq <- ssdata.mv1d.hq %>% left_join(mycolorsDF, by="Taxa")
+```
+
+
+#### 2. Create metadata fields<br />
+*Subject-Kit-Sample mapping, Race, TrueGA, Trimester, Vagitype, Vagitype_atV1*
+```{r metadata, echo=TRUE}
+
+# load subject-kit-sample mapping
+mappingDF <- read.csv2(paste(dataDir, "mapping.txt", sep=""), header = TRUE, sep="\t")
+mappingDF.mv1d <- mappingDF[mappingDF$SampleType == "MV1D",]
+#mappingDF.mv1d$VisitNum <- factor(mappingDF.mv1d$VisitNum)
+mappingDF.mv1d$KitID <- factor(mappingDF.mv1d$KitID)
+
+# load demographics
+raceData <- read.csv2(paste(dataDir, "race.txt", sep=""), header=TRUE, sep="\t")
+
+#####################
+# Create metadataDF #
+#####################
+mdata <- left_join(mappingDF.mv1d, raceData, by="ParticipantID")
+
+# add trimester
+trimesterDF <- read.csv2(paste(dataDir, "trimester.txt", sep=""), header = TRUE, sep = "\t")
+mdata <- left_join(mdata, trimesterDF, by="KitID")
+
+
+# ++++++++++++++++++++++++++++
+# getVagitype
+# ++++++++++++++++++++++++++++
+### This function retuns the vagitype of each Sample
+### Vagitype definition: >= 30% of dominant taxa 
+getVagitype <- function(propData) {
+  ## identify vagitypes
+  vagTypes <- apply(propData, 1, which.max)
+  maxProp <- propData[matrix(c(1:nrow(propData),vagTypes), ncol=2)]
+  vagTypes <- colnames(propData)[vagTypes]
+  vagTypes[maxProp < 30.0] <- "No Type"
+  
+  ## my vagTypeDF
+  vagTypeDF <- data.frame(cbind(rownames(propData), vagTypes))
+  vagTypeDF$vagTypes.2 <- NA
+  for(i in 1:nrow(vagTypeDF)) {
+    if(grepl("crispatus", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.crispatus"}
+    else if(grepl("iners", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.iners"}
+    else if(grepl("jensenii", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.jensenii"}
+    else if(grepl("gasseri", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.gasseri"}
+    else if(grepl("BVAB1", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "BVAB1"}
+    else if(grepl("vaginalis", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "G.vaginalis"}
+    else if(grepl("No Type", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "NoType"}
+    else {vagTypeDF[i,3] <- "OtherVT"}
+  }
+  
+  ## set colnames
+  colnames(vagTypeDF) <- c("SampleID", "vagitype", "vagitype.2") 
+  
+  return(vagTypeDF)
+}
+
+myVTOrder <- c("L.crispatus", "L.jensenii", "L.gasseri", "L.iners", "BVAB1", "G.vaginalis", "OtherVT", "NoType")
+
+# add vagitypes to metadata 
+propData <- acast(ssdata.mv1d.hq, SampleID~Taxa, value.var = "ATprop", fill=0.0)
+vagiTypeDF <- getVagitype(propData) 
+mdata <- left_join(mdata, vagiTypeDF, by="SampleID")
+mdata$vagitype.2 <- factor(mdata$vagitype.2, levels = myVTOrder)
+
+### get vagitype at earliest visit for each participant, add it to the metadata field
+# get subset of vaginal samples
+pid.vt <- data.frame(mdata$ParticipantID, mdata$VisitNum, mdata$vagitype.2)
+pid.vt <- pid.vt[!(is.na(pid.vt$mdata.vagitype.2)),]
+pid.vt.2 <- pid.vt %>% group_by(pid.vt$mdata.ParticipantID) %>% slice(min(pid.vt$mdata.VisitNum))
+vagType_atV1 <- data.frame(pid.vt.2$`pid.vt$mdata.ParticipantID`, pid.vt.2$mdata.vagitype.2)
+colnames(vagType_atV1) <- c("ParticipantID", "Vagitype_atV1")
+mdata <- left_join(mdata, vagType_atV1, by="ParticipantID")
+
+# add okpt status
+okptSamples <- read.csv2(paste(dataDir, "oneKitperTri.txt", sep=""), header=TRUE, sep='\t')
+okptSamples$okptStatus <- "Yes"
+mdata <- left_join(mdata, okptSamples, by=c("ParticipantID", "SampleID"))
+mdata$TrueGA <- NULL
+mdata$okptStatus[is.na(mdata$okptStatus)] <- "No"
+mdata$okptStatus <- factor(mdata$okptStatus)
+
+#########################
+# add mdata to datasets #
+#########################
+ssdata.mv1d.hq.meta <- left_join(ssdata.mv1d.hq, mdata, by="SampleID")
+ssdata.mv1d.hq.meta$SampleID <- factor(ssdata.mv1d.hq.meta$SampleID)
+ssdata.mv1d.hq.meta$vagitype.2 <- factor(ssdata.mv1d.hq.meta$vagitype.2)
+
+# add vagitype color
+vt.colors <- read.csv2(paste(dataDir, "vt_colors.txt", sep=""), header = T, sep="\t", stringsAsFactors = FALSE)
+ssdata.mv1d.hq.meta <- ssdata.mv1d.hq.meta %>% regex_left_join(vt.colors, by="vagitype")
+ssdata.mv1d.hq.meta$vagitype.y <- NULL
+colnames(ssdata.mv1d.hq.meta)[22] <- "vagitype"
+ssdata.mv1d.hq.meta$VTColor[is.na(ssdata.mv1d.hq.meta$VTColor)] <- "gray30"
+ssdata.mv1d.hq.meta$VTColor <- factor(ssdata.mv1d.hq.meta$VTColor)
+ssdata.mv1d.hq.meta$paulVTColors[is.na(ssdata.mv1d.hq.meta$paulVTColors)] <- "gray30"
+ssdata.mv1d.hq.meta$paulVTColors <- factor(ssdata.mv1d.hq.meta$paulVTColors)
+```
+
+*****
+
+*****
+
+
+## Longitudinal Plots
+
+```{r bc, echo=TRUE}
+
+# calculate median BC distance for every participant
+bcDF <- data.frame(ParticipantID=character(0), MedianBC=numeric(0))
+bcDF$ParticipantID <- as.character(bcDF$ParticipantID)
+for (x in levels(ssdata.mv1d.hq.meta$ParticipantID)) {
+  ssdata.test <- ssdata.mv1d.hq.meta[ssdata.mv1d.hq.meta$ParticipantID == x, ]
+  ssdata.test <- droplevels(ssdata.test)
+  ssdata.test.mat <- dcast(ssdata.test, SampleID~Taxa, value.var = "ATprop", fill = 0.0)
+  rownames(ssdata.test.mat) <- ssdata.test.mat[,1]
+  ssdata.test.mat <- ssdata.test.mat[, -1]
+  ssdata.test.mat.bc <- vegdist(as.data.frame(ssdata.test.mat), method = "bray") 
+  med <- median(ssdata.test.mat.bc)
+  bcDF[nrow(bcDF) + 1,] <- c(as.character(x),as.numeric(med))
+}
+bcDF <- bcDF[ order(bcDF$MedianBC),]
+```
+
+
+### Vagitype Plots
+
+__*Microbiome Stability over time*__
+
+Pairwise bray-curtis dissimilarity was computed among samples collected from each participant. The heatmap on the right indicates median BC diss index for each participant, indicative of the stability (simmilarity/dissimilarity) throughout gestation. Participants are grouped based on the vagitype/community state type at first visit.
+
+####AA
+```{r vt1, echo=TRUE, fig.height=3}
+ssdata.mv1d.hq.meta.aa <- ssdata.mv1d.hq.meta[ssdata.mv1d.hq.meta$race.2 == "african_american",]
+ssdata.mv1d.hq.meta.aa <- droplevels(ssdata.mv1d.hq.meta.aa)
+ssdata.mv1d.hq.meta.aa <- left_join(ssdata.mv1d.hq.meta.aa, bcDF, by="ParticipantID")
+ssdata.mv1d.hq.meta.aa$MedianBC <- as.numeric(as.character(ssdata.mv1d.hq.meta.aa$MedianBC))
+ssdata.mv1d.hq.meta.aa <- dplyr::arrange(ssdata.mv1d.hq.meta.aa, ssdata.mv1d.hq.meta.aa$Vagitype_atV1, desc(ssdata.mv1d.hq.meta.aa$MedianBC))
+ssdata.mv1d.hq.meta.aa$ParticipantID <- factor(ssdata.mv1d.hq.meta.aa$ParticipantID, levels = unique(ssdata.mv1d.hq.meta.aa$ParticipantID))
+
+levels(ssdata.mv1d.hq.meta.aa$Vagitype_atV1) <- c(expression(italic("L. crispatus")),
+                                                  expression(italic("L. gasseri")),
+                                                  expression(italic("L. iners")),
+                                                  expression("BVAB1"),
+                                                  expression(italic("G. vaginalis")),
+                                                  expression(paste("Other","VT")),
+                                                  expression(paste("No","Type")))
+p1 <- ggplot(ssdata.mv1d.hq.meta.aa, aes(x=trueGA, y=ParticipantID, color=paulVTColors)) + 
+      geom_point(aes(fill=paulVTColors,size = 4), shape=21, color="black") + 
+      theme(axis.text.x = element_text(size = 12), axis.text.y=element_blank(), 
+            axis.title = element_text(size = 12), 
+            #strip.text = element_text(face="bold", size=12), 
+            strip.text = element_blank(),
+            legend.position="none",
+            title = element_text(size=12, face="bold")) +
+      scale_fill_manual(values=levels(ssdata.mv1d.hq.meta.aa$paulVTColors)) +
+      facet_grid(Vagitype_atV1~., scales = "free_y", space = "free_y", labeller=label_parsed) +
+      labs(x="Gestational Age (Days)", y="Participants") + 
+      ggtitle("")
+# plot the medianBC dist
+p2 <- ggplot(ssdata.mv1d.hq.meta.aa, aes(x = "", y = ParticipantID)) + 
+      geom_tile(aes(fill = MedianBC)) + 
+      theme(axis.text.y = element_blank(), axis.title.y = element_blank(), 
+            axis.ticks = element_blank(), strip.text = element_blank(),
+            legend.position = "none") + 
+      labs(x=" ") + 
+      ggtitle(" ") +
+      facet_grid(Vagitype_atV1~., scales = "free_y", space = "free_y")
+figa <- plot_grid(p1, p2, ncol = 2, rel_widths = c(9,1))
+figa
+```
+
+####non-AA
+```{r vt2, echo=TRUE}
+ssdata.mv1d.hq.meta.naa <- ssdata.mv1d.hq.meta[ssdata.mv1d.hq.meta$race.2 == "non_african_american",]
+ssdata.mv1d.hq.meta.naa <- droplevels(ssdata.mv1d.hq.meta.naa)
+ssdata.mv1d.hq.meta.naa <- left_join(ssdata.mv1d.hq.meta.naa, bcDF, by="ParticipantID")
+ssdata.mv1d.hq.meta.naa$MedianBC <- as.numeric(as.character(ssdata.mv1d.hq.meta.naa$MedianBC))
+ssdata.mv1d.hq.meta.naa <- dplyr::arrange(ssdata.mv1d.hq.meta.naa, ssdata.mv1d.hq.meta.naa$Vagitype_atV1, desc(ssdata.mv1d.hq.meta.naa$MedianBC))
+ssdata.mv1d.hq.meta.naa$ParticipantID <- factor(ssdata.mv1d.hq.meta.naa$ParticipantID, levels = unique(ssdata.mv1d.hq.meta.naa$ParticipantID))
+
+levels(ssdata.mv1d.hq.meta.naa$Vagitype_atV1) <- c(expression(italic("L. crispatus")),
+                                                   expression(italic("L. jensenii")),
+                                                  expression(italic("L. gasseri")),
+                                                  expression(italic("L. iners")),
+                                                  expression("BVAB1"),
+                                                  expression(italic("G. vaginalis")),
+                                                  expression(paste("Other","VT")),
+                                                  expression(paste("No","Type")))
+p3 <- ggplot(ssdata.mv1d.hq.meta.naa, aes(x=trueGA, y=ParticipantID, color=paulVTColors)) + 
+      geom_point(aes(fill=paulVTColors, size = 4), shape=21, color="black") + 
+      theme(axis.text.y=element_blank(), axis.title = element_text(size = 12, face = "bold"), 
+            #strip.text = element_text(face="bold", size=12), 
+            strip.text = element_blank(), 
+            legend.position="none",
+            title = element_text(size=12, face="bold")) +
+      scale_fill_manual(values=levels(ssdata.mv1d.hq.meta.naa$paulVTColors)) +
+      facet_grid(Vagitype_atV1~., scales = "free_y", space = "free_y", labeller=label_parsed) +
+      labs(x="Gestational Age (Days)", y="Participants") + 
+      ggtitle("")
+# plot the medianBC dist
+p4 <- ggplot(ssdata.mv1d.hq.meta.naa, aes(x = "", y = ParticipantID)) + 
+      geom_tile(aes(fill = MedianBC)) + 
+      theme(axis.text.x = element_text(size=12), axis.text.y = element_blank(), 
+            axis.title.y = element_blank(), axis.ticks = element_blank(), 
+            strip.text = element_blank(), legend.position = "none") + 
+      labs(x=" ") + 
+      ggtitle(" ") +
+      facet_grid(Vagitype_atV1~., scales = "free_y", space = "free_y")
+
+# merge the two plots
+figb <- plot_grid(p3, p4, ncol = 2, rel_widths = c(9,1))
+```
+
+```{r, fig.width=12, fig.height=12}
+top_row <- plot_grid(figb, figa, ncol = 2, labels = c("a", "b"))
+top_row
+```
+
+```{r, fig.width=7, fig.height=2}
+tmp.plot <- ggplot(ssdata.mv1d.hq.meta, aes(x=trueGA, y=ParticipantID, color=paulVTColors)) +
+            geom_point(aes(fill=paulVTColors), shape=21, color="black") +
+            theme(legend.text = element_text(size=14),
+                  legend.title = element_text(size=16, face="bold"),
+                  legend.text.align = 0) +
+            scale_fill_manual(values = c("yellow", "green", "pink", "lightblue", "red", "orange",
+                                          "brown", "purple", "#1f77b4", "#FF00B0FF", "gray30", "darkcyan"),
+                               labels = c(expression(italic("L. crispatus")), expression(italic("L. jensenii")),
+                                          expression(italic("L. gasseri")), expression(italic("L. iners")),
+                                          expression(italic("G. vaginalis")), 'BVAB1', expression(italic("A. vaginae")),
+                                          expression(italic("S. amnii")), "Prevotella cluster2", "TM7 OTU H1",
+                                          "Other VT", "No Type")) + 
+            guides(fill=guide_legend(nrow = 4, title = " ", title.position = "top",
+                                      override.aes = list(size=5)))
+
+legend <- get_legend(tmp.plot)
+tlegend <- ggdraw(legend)
+
+tmp.plot2 <- ggplot(ssdata.mv1d.hq.meta.aa, aes(x = "", y = ParticipantID)) + 
+              geom_tile(aes(fill = MedianBC)) +
+              scale_fill_continuous(limits=c(0,1), breaks=c(0, 0.25, 0.5, 0.75, 1)) +
+              theme(legend.position = "bottom", 
+                    legend.title = element_text(size=14, face="bold"),
+                    legend.text = element_text(size=12)) + 
+              guides(fill=guide_colorbar(title = "Median Bray-Curtis Dissimilarity", 
+                                         title.position = "top",
+                                         barwidth = 15,
+                                         barheight = 1.5,
+                                         draw.ulim = FALSE, draw.llim = FALSE))
+legend <- get_legend(tmp.plot2)
+bclegend <- ggdraw(legend)              
+
+middle_row <- plot_grid(tlegend, bclegend, ncol = 2, rel_widths = c(3, 3))
+middle_row
+
+vagityelegend <- plot_grid(tlegend)
+vagityelegend
+ggsave(paste(imgDir, "vagitypeLegend.png", sep=""), vagityelegend, width = 6, height = 3, units = "in", dpi=600)
+```
+
+#### StabilityWithinRacialGrp
+```{r, echo=TRUE, fig.width=12, fig.height=4.5}
+ssdata.mv1d.hq.meta <- left_join(ssdata.mv1d.hq.meta, bcDF, by="ParticipantID")
+ssdata.mv1d.hq.meta$MedianBC <- as.numeric(ssdata.mv1d.hq.meta$MedianBC)
+tmp <- unique(data.frame(ssdata.mv1d.hq.meta$ParticipantID, ssdata.mv1d.hq.meta$race.2, ssdata.mv1d.hq.meta$Vagitype_atV1, ssdata.mv1d.hq.meta$MedianBC))
+colnames(tmp) <- c("ParticipantID", "race.2", "Vagitype_atV1", "MedianBC")
+tmp$race.3 <- ifelse(tmp$race.2 == "african_american", "African descent", "non-African descent")
+tmp$race.3 <- factor(tmp$race.3, levels = c("non-African descent", "African descent"))
+tmp <- droplevels(tmp)
+
+myxlabels <- c(expression(italic("L. crispatus")), expression(italic("L. jensenii")),
+               expression(italic("L. gasseri")), expression(italic("L. iners")),
+               "BVAB1", expression(italic("G. vaginalis")),
+               "Other VT", "No Type")
+
+myboxplot <- ggboxplot(tmp, x="Vagitype_atV1", y="MedianBC", 
+                      color="Vagitype_atV1", outlier.shape = NA,
+                      palette = c("yellow",  "green", "pink", "lightblue", "orange", "red", "gray30", "darkcyan"),
+                      size = 1.25) + 
+              geom_jitter(aes(fill=Vagitype_atV1), size=2, shape=21, color="black") + 
+              scale_x_discrete(labels = myxlabels) + 
+              theme_bw() + 
+              theme(axis.text = element_text(size=10, face="bold"), axis.text.x = element_text(face = "bold.italic"),
+                    strip.text = element_blank(), axis.title = element_blank(),
+                    legend.position = "none", title = element_text(size=12, face="bold")) +
+              ggtitle("")
+
+myboxplot
+
+cat("Posthoc pairwise comparisons with fdr adjustments:")
+res <- compare_means(MedianBC ~ Vagitype_atV1, tmp, group.by = "race.3", p.adjust.method = "fdr")
+DT::datatable(res)
+
+```
+
+
+```{r, fig.width=12, fig.height=16}
+vtplot <- plot_grid(top_row, NULL, middle_row, NULL, myboxplot, nrow = 5, rel_heights = c(9,0.1,1, 0.1, 2), labels = c("","","","","c"))
+
+extdataFig6 <- myboxplot + facet_grid(~race.3)
+```
+
+```{r}
+### save in eps format
+ggsave(paste(imgDir_eps, "Figure4a_nonafr.eps", sep=""), figb, units = "in", width = 6, height = 12, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure4b_afr.eps", sep=""), figa, units = "in", width = 6, height = 12, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure4_vtlegend.eps", sep=""), tlegend, units = "in", width = 6, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure4_bclegend.eps", sep=""), bclegend, units = "in", width = 4, height = 2, dpi = 600)
+ggsave(paste(imgDir_eps, "Figure4c_medianbetadiv.eps", sep=""), myboxplot, units = "in", width = 8, height = 3, dpi = 600)
+ggsave(paste(imgDir_eps, "ExtDataFigure6_medianbetadiv.eps", sep=""), extdataFig6, units = "in", width = 13, height = 3, dpi = 600)
+```
+

@@ -1,0 +1,653 @@
+---
+title: "Racioethnic diversity in the dynamics of vaginal microbiome during pregnancy"
+author: "Hardik I Parikh"
+date: "03/11/2019"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+      number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(reshape2)
+library(tidyverse)
+library(cowplot)
+library(fuzzyjoin)
+library(vegan)
+library(grid)
+library(gridExtra)
+library(ggpubr)
+library(ggsci)
+library(RColorBrewer)
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+theme_set(theme_bw())
+set.seed(12345)
+
+dataDir <- "./data/"
+imgDir <- "./figures/"
+imgDir_eps <- "./figures-eps/"
+```
+*****
+
+*****
+```{r}
+# ++++++++++++++++++++++++++++
+# getVagitype
+# ++++++++++++++++++++++++++++
+### This function retuns the vagitype of each Sample
+### Vagitype definition: >= 30% of dominant taxa 
+getVagitype <- function(propData) {
+  ## identify vagitypes
+  vagTypes <- apply(propData, 1, which.max)
+  maxProp <- propData[matrix(c(1:nrow(propData),vagTypes), ncol=2)]
+  vagTypes <- colnames(propData)[vagTypes]
+  vagTypes[maxProp < 30.0] <- "No Type"
+  
+  ## my vagTypeDF
+  vagTypeDF <- data.frame(cbind(rownames(propData), vagTypes))
+  vagTypeDF$vagTypes.2 <- NA
+  for(i in 1:nrow(vagTypeDF)) {
+    if(grepl("crispatus", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.crispatus"}
+    else if(grepl("iners", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.iners"}
+    else if(grepl("jensenii", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.jensenii"}
+    else if(grepl("gasseri", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.gasseri"}
+    else if(grepl("BVAB1", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "BVAB1"}
+    else if(grepl("vaginalis", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "G.vaginalis"}
+    else if(grepl("No Type", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "NoType"}
+    else {vagTypeDF[i,3] <- "OtherVT"}
+  }
+  
+  ## set colnames
+  colnames(vagTypeDF) <- c("SampleID", "vagitype", "vagitype.2") 
+  
+  return(vagTypeDF)
+}
+
+# ++++++++++++++++++++++++++++
+# sortByVagitype.v2
+# ++++++++++++++++++++++++++++
+### 16S microbial profiles
+### This function sorts Samples by Vagitype
+### Steps:
+###   1. Samples are classified into vagitypes (>= 30% dominant taxa)
+###   2. Samples ordered based on decreasing abundance of characteristic taxa
+###   3. Vagitype Order - 
+###         L.crispatus, L.iners, L.jensenii, L.gasseri, BVAB1, G.vaginalis, A.vaginae, OtherVT, NoType
+### Returns: Samples sorted by Vagitypes (custom order), that can be used as factor levels to plot StackedBars
+
+sortByVagitype.v2 <- function(propData) {
+  ##remove taxas (columns) with no counts (sum == 0)
+  #propData.2 <- propData[,apply(propData,2,sum) > 0]
+  
+  ## identify vagitypes
+  vagTypes <- apply(propData, 1, which.max)
+  maxProp <- propData[matrix(c(1:nrow(propData),vagTypes), ncol=2)]
+  vagTypes <- colnames(propData)[vagTypes]
+  vagTypes[maxProp < 30.0] <- "No Type"
+  
+  ## my vagTypeDF
+  vagTypeDF <- data.frame(cbind(rownames(propData), vagTypes))
+  vagTypeDF$vagTypes.2 <- NA
+  for(i in 1:nrow(vagTypeDF)) {
+    if(grepl("crispatus", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.crispatus"}
+    else if(grepl("iners", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.iners"}
+    else if(grepl("jensenii", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.jensenii"}
+    else if(grepl("gasseri", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "L.gasseri"}
+    else if(grepl("BVAB1", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "BVAB1"}
+    else if(grepl("vaginalis", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "G.vaginalis"}
+    else if(grepl("Atopobium_vaginae", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "A.vaginae"}
+    else if(grepl("No Type", vagTypeDF[i,2])) {vagTypeDF[i,3] <- "NoType"}
+    else {vagTypeDF[i,3] <- "OtherVT"}
+  }
+  vagTypes.uniq <- unique(vagTypeDF$vagTypes.2)
+  
+  # set default vagitype order
+  myVTOrder <- c("L.crispatus", "L.jensenii", "L.gasseri", "L.iners", "G.vaginalis", "BVAB1", "A.vaginae","OtherVT", "NoType")
+
+  # set default sampleOrder
+  sampleOrder <- vector(mode="character", length=0)
+  for (x in myVTOrder) {
+    if (x %in% vagTypes.uniq) {
+      samples <- vagTypeDF[grepl(x, vagTypeDF$vagTypes.2),]
+      #samples <- vagiTypeDF[vagiTypeDF$vagitype.2 == "L.crispatus", ]
+      #colnames(samples) <- c("V1", "V2", "V3")
+      if (length(samples$V1) > 1) {
+            propData.tmp <- propData[rownames(propData) %in% samples$V1,]
+            propData.tmp.melt <- melt(propData.tmp)
+            #propData.tmp.melt <- propData.tmp.melt[order(-propData.tmp.melt$value),]
+            #propData.tmp.melt <- propData.tmp.melt[order(-propData.tmp.melt$value, propData.tmp.melt$Var1, propData.tmp.melt$Var2),]
+            propData.tmp.melt <- propData.tmp.melt[order(-propData.tmp.melt$value, propData.tmp.melt$Var2, propData.tmp.melt$Var1),]
+            propData.tmp.melt$Var1 <- factor(propData.tmp.melt$Var1, levels = unique(propData.tmp.melt$Var1))
+            sampleOrder <- c(sampleOrder, levels(propData.tmp.melt$Var1))
+      }
+      else {
+        sampleOrder <- c(sampleOrder, as.character(samples$V1))
+      }
+    }
+  }
+  
+  ### return the custom sample order
+  return(sampleOrder)
+}
+
+#### Add Paul's Taxa Color Scheme
+addPaulColors <- function(propdata) {
+  mycolors <- c(rainbow(ncol(mypropdata), start=0.2, end=0.90))
+  mycolors[grep("Lactobacillus",   colnames(mypropdata))]      <- "yellow"
+  mycolors[grep("Sneathia",   colnames(mypropdata))]           <- "purple"
+  mycolors[grep("Gardnerella",     colnames(mypropdata))]      <- "red"
+  mycolors[grep("Lachnospiraceae", colnames(mypropdata))]      <- "orange"
+  mycolors[grep("BVAB", colnames(mypropdata))]                 <- "orange"
+  mycolors[grep("Prevotella",        colnames(mypropdata))]    <- "blue"
+  mycolors[grep("Atopobium",        colnames(mypropdata))]     <- "brown"
+  
+  mycolors[grep("crispatus",   colnames(mypropdata))]           <- "yellow"
+  mycolors[grep("iners",   colnames(mypropdata))]               <- "lightblue"
+  mycolors[grep("gasseri",   colnames(mypropdata))]             <- "pink"
+  mycolors[grep("delbrueckii",   colnames(mypropdata))]         <- "yellow3"
+  mycolors[grep("jensenii",   colnames(mypropdata))]            <- "green"
+  mycolors[grep("Sneathia.amnii",        colnames(mypropdata))] <- "purple"
+  mycolors[grep("Streptococcus",     colnames(mypropdata))]     <- "orange"
+
+  mycolorsDF <- data.frame(Taxa=colnames(mypropdata), paulColors=mycolors)
+  return(mycolorsDF)
+}
+
+
+myGGPlotTheme <- function() {
+  return( theme_bw() + theme(axis.text.x=element_blank(),
+                             axis.text.y=element_text(face="bold",size=8),
+                             axis.ticks.x=element_blank(),
+                             axis.title=element_text(size=10,face="bold"),
+                             legend.position = "none",
+                             legend.title = element_text(size=14, face="bold"),
+                             plot.title = element_text(size=14, face="bold"),
+                             strip.text = element_blank()
+                             )
+  )
+}
+```
+
+
+## Load Data
+
+#### 1. Load 16S profiles, WMGS, WMTS, cytokine profiles
+```{r loadProfs, echo=TRUE}
+
+###################
+# 16S data#
+###################
+## read the re-calculated proportions based on AT classification
+ssdata <- read.csv2(paste(dataDir, "stirrups_profiles.txt", sep=""), header=TRUE, sep='\t')
+ssdata$Percentage_Abundance <- as.numeric(as.character(ssdata$Percentage_Abundance))
+# remove below threshold data
+ssdata <- ssdata[ssdata$Threshold.Status == "AT",]
+ssdata <- droplevels(ssdata)
+
+## remove taxa assignments below 0.01% relab, and re-normalize
+ssdata <- ssdata[!(ssdata$Percentage_Abundance < 0.01), ]
+foo <- ssdata %>%
+  group_by(SampleID) %>%
+  summarise(TotalReads = sum(No_of_Reads))
+ssdata <- left_join(ssdata, foo, by="SampleID") %>%
+  mutate(ATprop = (No_of_Reads/TotalReads)*100)
+
+## keep vaginal samples only
+ssdata.mv1d <- ssdata[grepl("MV1D", ssdata$SampleID),]
+
+# read the mefit file to get HQ read count
+mefit <- read.csv2(paste(dataDir, "mefit_stats.txt", sep=""), header = TRUE, sep = "\t")
+hqsamples <- mefit[mefit$HQReads >= 1000, ]
+
+# filter hq samples (reads >= 1000) 
+ssdata.mv1d.hq <- ssdata.mv1d[ssdata.mv1d$SampleID %in% hqsamples$SampleID,]
+
+# add taxacolors
+taxa.colors <- read.csv2(paste(dataDir, "taxa_colors.txt", sep=""), header = T, sep = "\t", stringsAsFactors = FALSE)
+ssdata.mv1d.hq <- ssdata.mv1d.hq %>% regex_left_join(taxa.colors, by="Taxa")
+ssdata.mv1d.hq$Taxa.y <- NULL
+colnames(ssdata.mv1d.hq)[3] <- "Taxa"
+ssdata.mv1d.hq$TaxaColor[is.na(ssdata.mv1d.hq$TaxaColor)] <- "#faf0e6"
+ssdata.mv1d.hq$TaxaColor <- factor(ssdata.mv1d.hq$TaxaColor)
+
+# add paulColors
+mypropdata <- acast(ssdata.mv1d.hq, SampleID~Taxa, value.var = "ATprop", fill = 0.0)
+paulColorsDF <- addPaulColors(mypropdata)
+ssdata.mv1d.hq <- ssdata.mv1d.hq %>% left_join(paulColorsDF, by="Taxa")
+
+
+########
+# WMGS #
+########
+### Load taxonomic classification, pathway abundances for metagenomic data (WMGS)
+### Taxonomic classification: Clark-S, customDB (~4500 Whole genomes (RefSeq + BVAB1))
+### Pathway abundances: Humann2
+### Data has been prefiltered for hq samples (based on read counts)
+### 16S: >=1k reads, WMGS: >=100k reads
+ss_wmgs.data <- read.csv2(paste(dataDir, "ss_wmgs_profiles.txt", sep=""), header = TRUE, sep = "\t")
+ss_wmgs.data$relAb <- as.numeric(as.character(ss_wmgs.data$relAb))
+# add paulColors
+tmp <- ss_wmgs.data %>%
+  filter(!(omic == "PathwayAbundance")) %>%
+  select("SampleID", "feature") %>%
+  unique() %>%
+  mutate(num = 0.0)
+mypropdata <- acast(tmp, SampleID~feature, value.var = "num")
+paulColorsDF <- addPaulColors(mypropdata)
+colnames(paulColorsDF) <- c("feature", "paulColors")
+ss_wmgs.data <- ss_wmgs.data %>% left_join(paulColorsDF, by="feature")
+
+###############
+# WMGS + WMTS #
+###############
+### Load taxonomic classification, pathway abundances for metagenomic/metatranscriptomics data (WMGS/WMTS)
+### Taxonomic classification: Clark-S, customDB (~4500 Whole genomes (RefSeq + BVAB1))
+### Pathway abundances: Humann2
+### Data has been prefiltered for hq samples (based on read counts)
+### 16S: >=1k reads, WMGS: >=100k reads, WMTS: >=100k reads
+ss_wmgs_wmts.data <- read.csv2(paste(dataDir, "ss_wmgs_wmts.profiles.txt", sep=""), header = TRUE, sep = "\t")
+ss_wmgs_wmts.data$relAb <- as.numeric(as.character(ss_wmgs_wmts.data$relAb))
+# add paulColors
+tmp <- ss_wmgs_wmts.data %>%
+  filter(!(omic == "PathwayAbundance")) %>%
+  select("SampleID", "feature") %>%
+  unique() %>%
+  mutate(num = 0.0)
+mypropdata <- acast(tmp, SampleID~feature, value.var = "num")
+paulColorsDF <- addPaulColors(mypropdata)
+colnames(paulColorsDF) <- c("feature", "paulColors")
+ss_wmgs_wmts.data <- ss_wmgs_wmts.data %>% left_join(paulColorsDF, by="feature")
+```
+
+
+#### 2. Create metadata fields<br />
+*Subject-Kit-Sample mapping, Race, TrueGA, Trimester, Vagitype, Vagitype_atV1*
+```{r metadata, echo=TRUE}
+
+# load subject-kit-sample mapping
+mappingDF <- read.csv2(paste(dataDir, "mapping.txt", sep=""), header = TRUE, sep="\t")
+mappingDF.mv1d <- mappingDF[mappingDF$SampleType == "MV1D",]
+#mappingDF.mv1d$VisitNum <- factor(mappingDF.mv1d$VisitNum)
+mappingDF.mv1d$KitID <- factor(mappingDF.mv1d$KitID)
+
+# load demographics
+raceData <- read.csv2(paste(dataDir, "race.txt", sep=""), header=TRUE, sep="\t")
+
+#####################
+# Create metadataDF #
+#####################
+mdata <- left_join(mappingDF.mv1d, raceData, by="ParticipantID")
+
+# add trimester
+trimesterDF <- read.csv2(paste(dataDir, "trimester.txt", sep=""), header = TRUE, sep = "\t")
+mdata <- left_join(mdata, trimesterDF, by="KitID")
+
+# get VagiTypes
+myVTOrder <- c("L.crispatus", "L.jensenii", "L.gasseri", "L.iners", "BVAB1", "G.vaginalis", "OtherVT", "NoType")
+
+# add vagitypes to metadata 
+propData <- acast(ssdata.mv1d.hq, SampleID~Taxa, value.var = "ATprop", fill=0.0)
+vagiTypeDF <- getVagitype(propData) 
+mdata <- left_join(mdata, vagiTypeDF, by="SampleID")
+mdata$vagitype.2 <- factor(mdata$vagitype.2, levels = myVTOrder)
+
+### get vagitype at earliest visit for each participant, add it to the metadata field
+# get subset of vaginal samples
+pid.vt <- data.frame(mdata$ParticipantID, mdata$VisitNum, mdata$vagitype.2)
+pid.vt <- pid.vt[!(is.na(pid.vt$mdata.vagitype.2)),]
+pid.vt.2 <- pid.vt %>% group_by(pid.vt$mdata.ParticipantID) %>% slice(min(pid.vt$mdata.VisitNum))
+vagType_atV1 <- data.frame(pid.vt.2$`pid.vt$mdata.ParticipantID`, pid.vt.2$mdata.vagitype.2)
+colnames(vagType_atV1) <- c("ParticipantID", "Vagitype_atV1")
+mdata <- left_join(mdata, vagType_atV1, by="ParticipantID")
+
+# add okpt status
+okptSamples <- read.csv2(paste(dataDir, "oneKitperTri.txt", sep=""), header=TRUE, sep='\t')
+okptSamples$okptStatus <- "Yes"
+mdata <- left_join(mdata, okptSamples, by=c("ParticipantID", "SampleID"))
+mdata$TrueGA <- NULL
+mdata$okptStatus[is.na(mdata$okptStatus)] <- "No"
+mdata$okptStatus <- factor(mdata$okptStatus)
+
+# change race labels
+mdata$race.3 <- ifelse(mdata$race.2 == "non_african_american", "non-African descent", "African descent")
+mdata$race.3 <- factor(mdata$race.3, levels=c("non-African descent", "African descent"))
+
+#########################
+# add mdata to datasets #
+#########################
+ssdata.mv1d.hq.meta <- left_join(ssdata.mv1d.hq, mdata, by="SampleID")
+ssdata.mv1d.hq.meta$SampleID <- factor(ssdata.mv1d.hq.meta$SampleID)
+ssdata.mv1d.hq.meta$vagitype.2 <- factor(ssdata.mv1d.hq.meta$vagitype.2)
+
+# add vagitype color
+vt.colors <- read.csv2(paste(dataDir, "vt_colors.txt", sep=""), header = T, sep="\t", stringsAsFactors = FALSE)
+ssdata.mv1d.hq.meta <- ssdata.mv1d.hq.meta %>% regex_left_join(vt.colors, by="vagitype")
+ssdata.mv1d.hq.meta$vagitype.y <- NULL
+colnames(ssdata.mv1d.hq.meta)[22] <- "vagitype"
+ssdata.mv1d.hq.meta$VTColor[is.na(ssdata.mv1d.hq.meta$VTColor)] <- "gray30"
+ssdata.mv1d.hq.meta$VTColor <- factor(ssdata.mv1d.hq.meta$VTColor)
+ssdata.mv1d.hq.meta$paulVTColors[is.na(ssdata.mv1d.hq.meta$paulVTColors)] <- "gray30"
+ssdata.mv1d.hq.meta$paulVTColors <- factor(ssdata.mv1d.hq.meta$paulVTColors)
+
+ss_wmgs.data.meta <- left_join(ss_wmgs.data, mdata, by="SampleID")
+ss_wmgs.data.meta$SampleID <- factor(ss_wmgs.data.meta$SampleID)
+ss_wmgs.data.meta$vagitype.2 <- factor(ss_wmgs.data.meta$vagitype.2)
+
+ss_wmgs_wmts.data.meta <- left_join(ss_wmgs_wmts.data, mdata, by="SampleID")
+ss_wmgs_wmts.data.meta$SampleID <- factor(ss_wmgs_wmts.data.meta$SampleID)
+ss_wmgs_wmts.data.meta$vagitype.2 <- factor(ss_wmgs_wmts.data.meta$vagitype.2)
+```
+
+### WMGS Pathway Abundances
+
+```{r}
+# set order
+ss_wmgs.ssdata.meta <- ss_wmgs.data.meta[ss_wmgs.data.meta$omic == "16S_rRNA",]
+ss_wmgs.ssdata.meta <- droplevels(ss_wmgs.ssdata.meta)
+mypropdata <- acast(ss_wmgs.ssdata.meta, KitID.x~feature, value.var = "relAb", fill=0.0)
+kitorder <- sortByVagitype.v2(mypropdata)
+```
+
+
+```{r}
+ss_wmgs.ssdata.meta <- ss_wmgs.data.meta[ss_wmgs.data.meta$omic == "16S_rRNA",]
+ss_wmgs.ssdata.meta <- droplevels(ss_wmgs.ssdata.meta)
+ss_wmgs.ssdata.meta$relAb <- as.numeric(as.character(ss_wmgs.ssdata.meta$relAb))
+
+ss_wmgs.ssdata.meta$KitID.x <- factor(ss_wmgs.ssdata.meta$KitID.x, levels = kitorder)
+a <- ggplot(ss_wmgs.ssdata.meta, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = levels(ss_wmgs.ssdata.meta$paulColors)) +
+  labs(x="", y="Relative Abundance") +
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+a
+ggsave(paste(imgDir_eps, "Figure5a_16S.eps", sep=""), a, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+
+```{r}
+ss_wmgs.wmgs.meta <- ss_wmgs.data.meta[ss_wmgs.data.meta$omic == "WMGS",]
+ss_wmgs.wmgs.meta <- droplevels(ss_wmgs.wmgs.meta)
+ss_wmgs.wmgs.meta$relAb <- as.numeric(as.character(ss_wmgs.wmgs.meta$relAb))
+ss_wmgs.wmgs.meta$KitID.x <- factor(ss_wmgs.wmgs.meta$KitID.x, levels = kitorder)
+b <- ggplot(ss_wmgs.wmgs.meta, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = levels(ss_wmgs.wmgs.meta$paulColors)) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+b
+ggsave(paste(imgDir_eps, "Figure5b_WMGS.eps", sep=""), b, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+
+```{r}
+ss_wmgs.path.meta <- ss_wmgs.data.meta[ss_wmgs.data.meta$omic == "PathwayAbundance",]
+ss_wmgs.path.meta <- droplevels(ss_wmgs.path.meta)
+ss_wmgs.path.meta$relAb <- as.numeric(as.character(ss_wmgs.path.meta$relAb))
+ss_wmgs.path.meta$KitID.x <- factor(ss_wmgs.path.meta$KitID.x, levels = kitorder)
+#mycols <- colorRampPalette(brewer.pal(12, "Paired"))(355)
+mycols <- colorRampPalette(pal_simpsons("springfield")(16))(355)
+c <- ggplot(ss_wmgs.path.meta, aes(KitID.x, relAb, fill=feature, group=feature)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = mycols) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+c
+ggsave(paste(imgDir_eps, "Figure5c_WMGSPath.eps", sep=""), c, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+
+### WMTS Pathway Abundances
+
+```{r}
+# set order
+ss_wmgs_wmts.ssdata.meta <- ss_wmgs_wmts.data.meta[ss_wmgs_wmts.data.meta$omic == "16S_rRNA",]
+ss_wmgs_wmts.ssdata.meta <- droplevels(ss_wmgs_wmts.ssdata.meta)
+mypropdata <- acast(ss_wmgs_wmts.ssdata.meta, KitID.x~feature, value.var = "relAb", fill=0.0)
+kitorder <- sortByVagitype.v2(mypropdata)
+```
+
+```{r}
+ss_wmgs_wmts.ssdata.meta <- ss_wmgs_wmts.data.meta[ss_wmgs_wmts.data.meta$omic == "16S_rRNA",]
+ss_wmgs_wmts.ssdata.meta <- droplevels(ss_wmgs_wmts.ssdata.meta)
+ss_wmgs_wmts.ssdata.meta$relAb <- as.numeric(as.character(ss_wmgs_wmts.ssdata.meta$relAb))
+
+ss_wmgs_wmts.ssdata.meta$KitID.x <- factor(ss_wmgs_wmts.ssdata.meta$KitID.x, levels = kitorder)
+d <- ggplot(ss_wmgs_wmts.ssdata.meta, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = levels(ss_wmgs_wmts.ssdata.meta$paulColors)) +
+  labs(x="", y="Relative Abundance") +
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+d
+ggsave(paste(imgDir_eps, "Figure5d_16S.eps", sep=""), d, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+```{r}
+ss_wmgs_wmts.wmgs.meta <- ss_wmgs_wmts.data.meta[ss_wmgs_wmts.data.meta$omic == "WMGS",]
+ss_wmgs_wmts.wmgs.meta <- droplevels(ss_wmgs_wmts.wmgs.meta)
+ss_wmgs_wmts.wmgs.meta$relAb <- as.numeric(as.character(ss_wmgs_wmts.wmgs.meta$relAb))
+ss_wmgs_wmts.wmgs.meta$KitID.x <- factor(ss_wmgs_wmts.wmgs.meta$KitID.x, levels = kitorder)
+e <- ggplot(ss_wmgs_wmts.wmgs.meta, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = levels(ss_wmgs_wmts.wmgs.meta$paulColors)) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+e
+ggsave(paste(imgDir_eps, "Figure5e_WMGS.eps", sep=""), e, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+```{r}
+ss_wmgs_wmts.wmts.meta <- ss_wmgs_wmts.data.meta[ss_wmgs_wmts.data.meta$omic == "WMTS",]
+ss_wmgs_wmts.wmts.meta <- droplevels(ss_wmgs_wmts.wmts.meta)
+ss_wmgs_wmts.wmts.meta$relAb <- as.numeric(as.character(ss_wmgs_wmts.wmts.meta$relAb))
+ss_wmgs_wmts.wmts.meta$KitID.x <- factor(ss_wmgs_wmts.wmts.meta$KitID.x, levels = kitorder)
+f <- ggplot(ss_wmgs_wmts.wmts.meta, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = levels(ss_wmgs_wmts.wmts.meta$paulColors)) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+f
+ggsave(paste(imgDir_eps, "Figure5f_WMTS.eps", sep=""), f, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+```{r}
+pathTotal <- ss_wmgs_wmts.data.meta %>%
+  filter(!(omic %in% c("16S_rRNA", "WMGS", "WMTS"))) %>%
+  select(KitID.x, feature, relAb) %>%
+  group_by(feature) %>%
+  summarise(sumrelAb = sum(relAb)) %>%
+  arrange(-(sumrelAb)) 
+toppath <- pathTotal %>%
+  top_n(25) %>%
+  mutate(feature2 = gsub(".*__", "", feature)) %>%
+  mutate(feature2 = gsub("_\\(.*", "", feature2))
+
+```
+
+```{r}
+ss_wmgs_wmts.wmgspath <- ss_wmgs_wmts.data.meta %>%
+  filter(omic == "WMGS-PathwayAbundance") %>%
+  filter(feature %in% unique(toppath$feature)) %>%
+  mutate(KitID.x = factor(KitID.x, levels = kitorder)) %>%
+  mutate(feature2 = gsub(".*__", "", feature)) %>%
+  mutate(feature2 = gsub("_\\(.*", "", feature2))
+ss_wmgs_wmts.wmgspath <- droplevels(ss_wmgs_wmts.wmgspath)
+ss_wmgs_wmts.wmgspath$feature2 <- factor(ss_wmgs_wmts.wmgspath$feature2, levels = rev(unique(toppath$feature2)))
+
+#mycols <- rev(pal_ucscgb("default", alpha = 0.9)(25))
+
+g <- ggplot(ss_wmgs_wmts.wmgspath, aes(KitID.x, relAb, fill=feature2)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = c("adenosine_ribonucleotides_de_novo_biosynthesis" = "#5050FFFF",
+                               "UDP-N-acetyl-D-glucosamine_biosynthesis_I" = "#CE3D32FF",
+                               "guanosine_ribonucleotides_de_novo_biosynthesis" = "#749B58FF",
+                               "pyruvate_fermentation_to_acetate_and_lactate_II" = "#F0E685FF",
+                               "coenzyme_A_biosynthesis_II" = "#466983FF",
+                               "S-adenosyl-L-methionine_cycle_I" = "#BA6338FF",
+                               "UDP-N-acetylmuramoyl-pentapeptide_biosynthesis_II" = "#5DB1DDFF",
+                               "peptidoglycan_biosynthesis_I" = "#802268FF",
+                               "UDP-N-acetylmuramoyl-pentapeptide_biosynthesis_I" = "#6BD76BFF",
+                               "UMP_biosynthesis" = "#D595A7FF",
+                               "pentose_phosphate_pathway" = "#924822FF",
+                               "sucrose_degradation_III" = "#D58F5CFF",
+                               "L-lysine_biosynthesis_III" = "#7A65A5FF",
+                               "superpathway_of_adenosine_nucleotides_de_novo_biosynthesis_I" = "#E4AF69FF",
+                               "L-lysine_biosynthesis_VI" = "#3B1B53FF",
+                               "L-lysine_biosynthesis_II" = "#CDDEB7FF",
+                               "coenzyme_A_biosynthesis_I" = "#AE1F63FF",
+                               "pantothenate_and_coenzyme_A_biosynthesis_III" = "#99CC00FF",
+                               "superpathway_of_adenosine_nucleotides_de_novo_biosynthesis_II" = "#A9A9A9FF",
+                               "glycolysis_IV" = "#00CC33FF",
+                               "lactose_and_galactose_degradation_I" = "#00CC99FF",
+                               "superpathway_of_guanosine_nucleotides_de_novo_biosynthesis_I" = "#0A47FFFF",
+                               "5-aminoimidazole_ribonucleotide_biosynthesis_II" = "#FFC20AFF",
+                               "superpathway_of_5-aminoimidazole_ribonucleotide_biosynthesis" = "#990033FF",
+                               "CDP-diacylglycerol_biosynthesis_II" = "#009966FF",
+                               "CDP-diacylglycerol_biosynthesis_I" = "#14FFB1FF")) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+g
+ggsave(paste(imgDir_eps, "Figure5g_WMGSPath.eps", sep=""), g, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+```{r}
+ss_wmgs_wmts.wmtspath <- ss_wmgs_wmts.data.meta %>%
+  filter(omic == "WMTS-PathwayAbundance") %>%
+  filter(feature %in% unique(toppath$feature)) %>%
+  mutate(KitID.x = factor(KitID.x, levels = kitorder)) %>%
+  mutate(feature2 = gsub(".*__", "", feature)) %>%
+  mutate(feature2 = gsub("_\\(.*", "", feature2))
+ss_wmgs_wmts.wmtspath <- droplevels(ss_wmgs_wmts.wmtspath)
+ss_wmgs_wmts.wmtspath$feature2 <- factor(ss_wmgs_wmts.wmtspath$feature2, levels = rev(unique(toppath$feature2)))
+
+#mycols <- rev(pal_ucscgb("default", alpha = 0.9)(25))
+
+h <- ggplot(ss_wmgs_wmts.wmtspath, aes(KitID.x, relAb, fill=feature2)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = c("adenosine_ribonucleotides_de_novo_biosynthesis" = "#5050FFFF",
+                               "UDP-N-acetyl-D-glucosamine_biosynthesis_I" = "#CE3D32FF",
+                               "guanosine_ribonucleotides_de_novo_biosynthesis" = "#749B58FF",
+                               "pyruvate_fermentation_to_acetate_and_lactate_II" = "#F0E685FF",
+                               "coenzyme_A_biosynthesis_II" = "#466983FF",
+                               "S-adenosyl-L-methionine_cycle_I" = "#BA6338FF",
+                               "UDP-N-acetylmuramoyl-pentapeptide_biosynthesis_II" = "#5DB1DDFF",
+                               "peptidoglycan_biosynthesis_I" = "#802268FF",
+                               "UDP-N-acetylmuramoyl-pentapeptide_biosynthesis_I" = "#6BD76BFF",
+                               "UMP_biosynthesis" = "#D595A7FF",
+                               "pentose_phosphate_pathway" = "#924822FF",
+                               "sucrose_degradation_III" = "#D58F5CFF",
+                               "L-lysine_biosynthesis_III" = "#7A65A5FF",
+                               "superpathway_of_adenosine_nucleotides_de_novo_biosynthesis_I" = "#E4AF69FF",
+                               "L-lysine_biosynthesis_VI" = "#3B1B53FF",
+                               "L-lysine_biosynthesis_II" = "#CDDEB7FF",
+                               "coenzyme_A_biosynthesis_I" = "#AE1F63FF",
+                               "pantothenate_and_coenzyme_A_biosynthesis_III" = "#99CC00FF",
+                               "superpathway_of_adenosine_nucleotides_de_novo_biosynthesis_II" = "#A9A9A9FF",
+                               "glycolysis_IV" = "#00CC33FF",
+                               "lactose_and_galactose_degradation_I" = "#00CC99FF",
+                               "superpathway_of_guanosine_nucleotides_de_novo_biosynthesis_I" = "#0A47FFFF",
+                               "5-aminoimidazole_ribonucleotide_biosynthesis_II" = "#FFC20AFF",
+                               "superpathway_of_5-aminoimidazole_ribonucleotide_biosynthesis" = "#990033FF",
+                               "CDP-diacylglycerol_biosynthesis_II" = "#009966FF",
+                               "CDP-diacylglycerol_biosynthesis_I" = "#14FFB1FF")) +
+  labs(x="", y="Relative Abundance") + 
+  ggtitle("WMTS: Pathway Abundances") +
+  myGGPlotTheme() + 
+  facet_wrap(~race.3, scales = "free_x")
+h
+ggsave(paste(imgDir_eps, "Figure5h_WMTSPath.eps", sep=""), h, units = "in", width = 7, height = 2.5, dpi=600)
+```
+
+
+
+```{r, fig.width=7, fig.height=3}
+myTaxaList <- c("Lactobacillus_crispatus", "Lactobacillus_iners", "Lactobacillus_gasseri",
+                "Lactobacillus_jensenii", "Lachnospiraceae_BVAB1", "Gardnerella_vaginalis",
+                "Atopobium_vaginae", "Sneathia_amnii", "Prevotella_timonensis") 
+plotDF <- ss_wmgs.ssdata.meta %>%
+  filter(feature %in% myTaxaList) 
+tmp.plot <- ggplot(plotDF, aes(KitID.x, relAb, fill=paulColors, group=relAb)) + 
+  geom_bar(stat = "identity", position = "stack") + 
+  myGGPlotTheme() + 
+  theme(legend.position = "bottom", 
+        legend.text = element_text(size=12),
+        legend.text.align = 0,
+        legend.justification = "center",
+        plot.margin = unit(c(0, 0, 0, 0), "cm")) + 
+  scale_fill_manual(values=c("yellow", "green", "pink", 
+                            "lightblue", "orange", "red",
+                             "brown", "purple", "blue"), 
+                    labels=c(expression(italic("L. crispatus")),
+                             expression(italic("L. jensenii")),
+                             expression(italic("L. gasseri")),
+                             expression(italic("L. iners")),
+                             "BVAB1",
+                             expression(italic("G. vaginalis")),
+                             expression(italic("A. vaginae")),
+                             expression(italic("S. amnii")),
+                             "Prevotella cluster2")) + 
+  guides(fill=guide_legend(ncol = 3, title = "Taxa (Panels: a, b, d, e, f)", title.position = "top", override.aes = list(size=5)))
+legend <- get_legend(tmp.plot)
+tlegend <- ggdraw(legend)
+tlegend
+ggsave(paste(imgDir_eps, "Figure5_taxalegend.eps", sep=""), tlegend, units = "in", width = 5, height = 2.5, dpi=600)
+```
+
+```{r, fig.width=4}
+# pathway legend
+ss_wmgs_wmts.wmgspath <- ss_wmgs_wmts.wmgspath %>%
+  mutate(feature2 = gsub(".*__", "", feature)) %>%
+  mutate(feature2 = gsub("_\\(.*", "", feature2)) 
+tmp <- ggplot(ss_wmgs_wmts.wmgspath, aes(KitID.x, relAb, fill=feature2)) + 
+  geom_bar(stat="identity", position="stack", width=1) +
+  scale_fill_manual(values = mycols) +
+  myGGPlotTheme() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 10)) + 
+  guides(fill=guide_legend(ncol = 2, title = "Pathway Legend (Panels: g, h)", title.position = "top", override.aes = list(size=5)))
+
+g2 <- g + theme(legend.position = "bottom",
+        legend.text = element_text(size = 12)) + 
+  guides(fill=guide_legend(ncol = 2, title = "Most Abundant Pathways (Panels: g, h)", title.position = "top", override.aes = list(size=5)))
+legend <- get_legend(g2)
+plegend <- ggdraw(legend)
+plegend
+ggsave(paste(imgDir_eps, "Figure5_pathlegend.eps", sep=""), plegend, units = "in", width = 10, height = 5, dpi=600)
+```
+
+```{r, fig.height=3}
+legends <- plot_grid(tlegend, plegend, nrow = 2, rel_heights = c(1,3), vjust = 1)
+legends
+```
+
+
+## Final Figure
+
+```{r, fig.width=14, fig.height=14}
+left_panel <- plot_grid(a,b,c,legends, ncol = 1, rel_heights = c(1,1,1,2), labels = c("a","b","c",""))
+right_panel <- plot_grid(d,e,f,g,h, ncol = 1, rel_heights = c(1,1,1,1,1), labels = c("d", "e", "f", "g", "h"))
+
+fig <- plot_grid(left_panel, right_panel, ncol = 2, rel_widths = c(1,1))
+ggsave(paste(imgDir, "Figure5.png", sep=""), fig,width = 20, height = 20, units = "in", dpi=600)
+```
+
